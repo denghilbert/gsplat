@@ -310,22 +310,25 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
-        self.parser = Parser(
-            data_dir=cfg.data_dir,
-            factor=cfg.data_factor,
-            normalize=cfg.normalize_world_space,
-            test_every=cfg.test_every,
-        )
-        self.trainset = Dataset(
-            self.parser,
-            split="train",
-            patch_size=cfg.patch_size,
-            load_depths=cfg.depth_loss,
-        )
-        self.valset = Dataset(self.parser, split="val")
-        self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
-        print("Scene scale:", self.scene_scale)
+        # self.parser = Parser(
+        #     data_dir=cfg.data_dir,
+        #     factor=cfg.data_factor,
+        #     normalize=cfg.normalize_world_space,
+        #     test_every=cfg.test_every,
+        # )
+        # self.trainset = Dataset(
+        #     self.parser,
+        #     split="train",
+        #     patch_size=cfg.patch_size,
+        #     load_depths=cfg.depth_loss,
+        # )
+        # self.valset = Dataset(self.parser, split="val")
+        # self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
+        # print("Scene scale:", self.scene_scale)
 
+        self.parser = None
+        self.scene_scale = 1.0
+        print("Loading Mitsuba data...")
         self.camtoworld_list, self.Ks_list, self.gt_img_list, self.gt_img_name_list, self.pcd = readCamerasFromTransforms(cfg.mitsuba_dir, 'transforms_train.json', None)
         # Model
         feature_dim = 32 if cfg.app_opt else None
@@ -374,10 +377,6 @@ class Runner:
             l_lens_net = [{'params': self.lens_net.parameters(), 'lr': 1e-5}]
             optimizer_lens_net = torch.optim.Adam(l_lens_net, eps=1e-15)
             scheduler_lens_net = torch.optim.lr_scheduler.MultiStepLR(optimizer_lens_net, milestones=[5000], gamma=0.5)
-
-            viewpoint_cam = self.trainset.__getitem__(0)
-            coeff = self.trainset.__getitem__(0)['coeff']
-            #init_from_colmap(viewpoint_cam, coeff, cfg.result_dir, self.lens_net, optimizer_lens_net, scheduler_lens_net, iresnet_lr=1e-7)
         else:
             self.lens_net = iResNet().cuda()
 
@@ -466,7 +465,7 @@ class Runner:
         self.bil_grid_optimizers = []
         if cfg.use_bilateral_grid:
             self.bil_grids = BilateralGrid(
-                len(self.trainset),
+                len(self.gt_img_list),
                 grid_X=cfg.bilateral_grid_shape[0],
                 grid_Y=cfg.bilateral_grid_shape[1],
                 grid_W=cfg.bilateral_grid_shape[2],
@@ -604,15 +603,15 @@ class Runner:
                 )
             )
 
-        trainloader = torch.utils.data.DataLoader(
-            self.trainset,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-            num_workers=4,
-            persistent_workers=True,
-            pin_memory=True,
-        )
-        trainloader_iter = iter(trainloader)
+        # trainloader = torch.utils.data.DataLoader(
+        #     self.trainset,
+        #     batch_size=cfg.batch_size,
+        #     shuffle=True,
+        #     num_workers=4,
+        #     persistent_workers=True,
+        #     pin_memory=True,
+        # )
+        # trainloader_iter = iter(trainloader)
 
 
         # Training loop.
@@ -625,25 +624,24 @@ class Runner:
                 self.viewer.lock.acquire()
                 tic = time.time()
 
-            try:
-                data = next(trainloader_iter)
-            except StopIteration:
-                trainloader_iter = iter(trainloader)
-                data = next(trainloader_iter)
+            # try:
+            #     data = next(trainloader_iter)
+            # except StopIteration:
+            #     trainloader_iter = iter(trainloader)
+            #     data = next(trainloader_iter)
+            # camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
+            # Ks = data["K"].to(device)  # [1, 3, 3]
+            # pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
+            # num_train_rays_per_step = (
+            #     pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+            # )
+            # image_ids = data["image_id"].to(device)
+            # masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
+            # if cfg.depth_loss:
+            #     points = data["points"].to(device)  # [1, M, 2]
+            #     depths_gt = data["depths"].to(device)  # [1, M]
+            # height, width = pixels.shape[1:3]
 
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
-            Ks = data["K"].to(device)  # [1, 3, 3]
-            pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
-            num_train_rays_per_step = (
-                pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
-            )
-            image_ids = data["image_id"].to(device)
-            masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
-            if cfg.depth_loss:
-                points = data["points"].to(device)  # [1, M, 2]
-                depths_gt = data["depths"].to(device)  # [1, M]
-
-            height, width = pixels.shape[1:3]
 
             if cfg.pose_noise:
                 camtoworlds = self.pose_perturb(camtoworlds, image_ids)
@@ -662,8 +660,9 @@ class Runner:
             gt_img_pil = self.gt_img_list[step % len(self.Ks_list)]
             width, height = gt_img_pil.size
             gt_img = PILtoTorch(gt_img_pil, gt_img_pil.size)[:3, ...].clamp(0.0, 1.0).cuda().permute(1, 2, 0).unsqueeze(0)
-            data['fisheye_image'] = gt_img * 255
-            mask = None
+            gt_img_255 = gt_img * 255
+            num_train_rays_per_step = (gt_img_255.shape[0] * gt_img_255.shape[1] * gt_img_255.shape[2])
+            masks = None
 
             #renders, alphas, info = self.rasterize_splats(
             #    camtoworlds=camtoworlds,
@@ -694,7 +693,6 @@ class Runner:
             Ks[0][0][-1] = new_width / 2
             Ks[0][1][-1] = new_height / 2
             img_list, info_list = render_cubemap(width, height, new_width, new_height, fov90_width, fov90_height, Ks, camtoworlds, cfg, sh_degree_to_use, image_ids, masks, self.cubemap_net, self.rasterize_splats, cubemap_net_threshold=1.392)
-
             #if renders.shape[-1] == 4:
             #    colors, depths = renders[..., 0:3], renders[..., 3:4]
             #else:
@@ -722,7 +720,7 @@ class Runner:
             )
 
             # apply distortion field
-            fish_gt = (data['fisheye_image'].permute(0, 3, 1, 2)/255).cuda()
+            fish_gt = (gt_img_255.permute(0, 3, 1, 2)/255).cuda()
 
             #final_image = torch.zeros_like(img_list[0])
             #intensity_final = final_image.sum(dim=0, keepdim=True)  # Track the current intensities of the final image
@@ -734,7 +732,7 @@ class Runner:
             #torchvision.utils.save_image(final_image, os.path.join(cfg.result_dir, f'final_fish.png'))
             #torchvision.utils.save_image(data['fisheye_image'].permute(0, 3, 1, 2)/255, os.path.join(cfg.result_dir, f'gt_fish.png'))
 
-            mask_gt_image = generate_circular_mask(fish_gt[0].shape, 400).cuda()
+            mask_gt_image = generate_circular_mask(fish_gt[0].shape, 512).cuda()
 
             #torchvision.utils.save_image(final_image*mask_gt_image, os.path.join(cfg.result_dir, f'final_fish_masked_{step}.png'))
             #torchvision.utils.save_image(fish_gt[0] * mask_gt_image, os.path.join(cfg.result_dir, f'gt_0.png'))
@@ -942,10 +940,9 @@ class Runner:
                 assert_never(self.cfg.strategy)
 
             # eval the full set
-            if step in [1, 5000, 10000, 15000, 20000, 25000]:
-            #if step in [i - 1 for i in cfg.eval_steps]:
+            if step in [i - 1 for i in cfg.eval_steps]:
                 self.eval(step, self.cubemap_net, self.rasterize_splats)
-                self.render_traj(step)
+                # self.render_traj(step)
 
             # run compression
             if cfg.compression is not None and step in [i - 1 for i in cfg.eval_steps]:
@@ -971,9 +968,6 @@ class Runner:
         world_rank = self.world_rank
         world_size = self.world_size
 
-        valloader = torch.utils.data.DataLoader(
-            self.valset, batch_size=1, shuffle=False, num_workers=1
-        )
         ellipse_time = 0
         metrics = defaultdict(list)
         for i, camtoworlds in enumerate(self.camtoworld_list):
@@ -1041,7 +1035,7 @@ class Runner:
                     metrics["cc_psnr"].append(self.psnr(cc_colors_p, pixels_p))
 
         if world_rank == 0:
-            ellipse_time /= len(valloader)
+            ellipse_time /= len(self.gt_img_list)
 
             stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
             stats.update(

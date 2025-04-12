@@ -230,11 +230,10 @@ __global__ void fully_fused_projection_packed_fwd_kernel(
             radii[thread_data] = (int32_t)radius;
             means2d[thread_data * 2] = mean2d.x;
             means2d[thread_data * 2 + 1] = mean2d.y;
-            //if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
+            // if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) {
             //    printf("%f\n", mean_c.z);
-            //}
-            depths[thread_data] = mean_c.z;
-            //depths[thread_data] = sqrt((glm::make_vec3(means).x - cam_center.x) * (glm::make_vec3(means).x - cam_center.x) + (glm::make_vec3(means).y - cam_center.y) * (glm::make_vec3(means).y - cam_center.y) + (glm::make_vec3(means).z - cam_center.z) * (glm::make_vec3(means).z - cam_center.z));
+            //depths[thread_data] = mean_c.z;
+            depths[thread_data] = sqrt((glm::make_vec3(means).x - cam_center.x) * (glm::make_vec3(means).x - cam_center.x) + (glm::make_vec3(means).y - cam_center.y) * (glm::make_vec3(means).y - cam_center.y) + (glm::make_vec3(means).z - cam_center.z) * (glm::make_vec3(means).z - cam_center.z));
             conics[thread_data * 3] = covar2d_inv[0][0];
             conics[thread_data * 3 + 1] = covar2d_inv[0][1];
             conics[thread_data * 3 + 2] = covar2d_inv[1][1];
