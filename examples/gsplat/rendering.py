@@ -50,6 +50,7 @@ def rasterization(
     channel_chunk: int = 32,
     distributed: bool = False,
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
+    if_cubemap: bool = False,
     covars: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor, Dict]:
     """Rasterize a set of 3D Gaussians (N) to a batch of image planes (C).
@@ -311,6 +312,7 @@ def rasterization(
         sparse_grad=sparse_grad,
         calc_compensations=(rasterize_mode == "antialiased"),
         camera_model=camera_model,
+        if_cubemap=if_cubemap,
     )
 
     if packed:

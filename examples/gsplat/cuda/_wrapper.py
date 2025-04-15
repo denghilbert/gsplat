@@ -217,6 +217,7 @@ def fully_fused_projection(
     sparse_grad: bool = False,
     calc_compensations: bool = False,
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
+    if_cubemap: bool = False,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Projects Gaussians to 2D.
 
@@ -319,6 +320,7 @@ def fully_fused_projection(
             sparse_grad,
             calc_compensations,
             camera_model,
+            if_cubemap,
         )
     else:
         return _FullyFusedProjection.apply(
@@ -1049,36 +1051,64 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         sparse_grad: bool,
         calc_compensations: bool,
         camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole",
+        if_cubemap: bool = False,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         camera_model_type = _make_lazy_cuda_obj(
             f"CameraModelType.{camera_model.upper()}"
         )
 
-        (
-            indptr,
-            camera_ids,
-            gaussian_ids,
-            radii,
-            means2d,
-            depths,
-            conics,
-            compensations,
-        ) = _make_lazy_cuda_func("fully_fused_projection_packed_fwd")(
-            means,
-            covars,  # optional
-            quats,  # optional
-            scales,  # optional
-            viewmats,
-            Ks,
-            width,
-            height,
-            eps2d,
-            near_plane,
-            far_plane,
-            radius_clip,
-            calc_compensations,
-            camera_model_type,
-        )
+        if not if_cubemap:
+            (
+                indptr,
+                camera_ids,
+                gaussian_ids,
+                radii,
+                means2d,
+                depths,
+                conics,
+                compensations,
+            ) = _make_lazy_cuda_func("fully_fused_projection_packed_fwd")(
+                means,
+                covars,  # optional
+                quats,  # optional
+                scales,  # optional
+                viewmats,
+                Ks,
+                width,
+                height,
+                eps2d,
+                near_plane,
+                far_plane,
+                radius_clip,
+                calc_compensations,
+                camera_model_type,
+            )
+        else:
+            (
+                indptr,
+                camera_ids,
+                gaussian_ids,
+                radii,
+                means2d,
+                depths,
+                conics,
+                compensations,
+            ) = _make_lazy_cuda_func("fully_fused_cubemap_projection_packed_fwd")(
+                means,
+                covars,  # optional
+                quats,  # optional
+                scales,  # optional
+                viewmats,
+                Ks,
+                width,
+                height,
+                eps2d,
+                near_plane,
+                far_plane,
+                radius_clip,
+                calc_compensations,
+                camera_model_type,
+            )
         if not calc_compensations:
             compensations = None
         ctx.save_for_backward(
@@ -1098,6 +1128,7 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
         ctx.eps2d = eps2d
         ctx.sparse_grad = sparse_grad
         ctx.camera_model_type = camera_model_type
+        ctx.if_cubemap = if_cubemap
 
         return camera_ids, gaussian_ids, radii, means2d, depths, conics, compensations
 
@@ -1132,30 +1163,56 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
 
         if v_compensations is not None:
             v_compensations = v_compensations.contiguous()
-        v_means, v_covars, v_quats, v_scales, v_viewmats = _make_lazy_cuda_func(
-            "fully_fused_projection_packed_bwd"
-        )(
-            means,
-            covars,
-            quats,
-            scales,
-            viewmats,
-            Ks,
-            width,
-            height,
-            eps2d,
-            camera_model_type,
-            camera_ids,
-            gaussian_ids,
-            conics,
-            compensations,
-            v_means2d.contiguous(),
-            v_depths.contiguous(),
-            v_conics.contiguous(),
-            v_compensations,
-            ctx.needs_input_grad[4],  # viewmats_requires_grad
-            sparse_grad,
-        )
+        if not ctx.if_cubemap:
+            v_means, v_covars, v_quats, v_scales, v_viewmats = _make_lazy_cuda_func(
+                "fully_fused_projection_packed_bwd"
+            )(
+                means,
+                covars,
+                quats,
+                scales,
+                viewmats,
+                Ks,
+                width,
+                height,
+                eps2d,
+                camera_model_type,
+                camera_ids,
+                gaussian_ids,
+                conics,
+                compensations,
+                v_means2d.contiguous(),
+                v_depths.contiguous(),
+                v_conics.contiguous(),
+                v_compensations,
+                ctx.needs_input_grad[4],  # viewmats_requires_grad
+                sparse_grad,
+            )
+        else:
+            v_means, v_covars, v_quats, v_scales, v_viewmats = _make_lazy_cuda_func(
+                "fully_fused_cubemap_projection_packed_bwd"
+            )(
+                means,
+                covars,
+                quats,
+                scales,
+                viewmats,
+                Ks,
+                width,
+                height,
+                eps2d,
+                camera_model_type,
+                camera_ids,
+                gaussian_ids,
+                conics,
+                compensations,
+                v_means2d.contiguous(),
+                v_depths.contiguous(),
+                v_conics.contiguous(),
+                v_compensations,
+                ctx.needs_input_grad[4],  # viewmats_requires_grad
+                sparse_grad,
+            )
 
         if not ctx.needs_input_grad[0]:
             v_means = None
@@ -1210,6 +1267,7 @@ class _FullyFusedProjectionPacked(torch.autograd.Function):
             v_quats,
             v_scales,
             v_viewmats,
+            None,
             None,
             None,
             None,
