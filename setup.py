@@ -8,7 +8,7 @@ import sys
 from setuptools import find_packages, setup
 
 __version__ = None
-exec(open("gsplat/version.py", "r").read())
+exec(open("examples/gsplat/version.py", "r").read())
 
 URL = "https://github.com/nerfstudio-project/gsplat"
 

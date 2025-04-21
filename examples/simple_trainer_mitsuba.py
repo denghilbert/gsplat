@@ -47,7 +47,8 @@ from gsplat.optimizers import SelectiveAdam
 from iresnet import iResNet
 
 from utils_cubemap import homogenize, dehomogenize, fov2focal, focal2fov, generate_pts, init_from_coeff, plot_points, init_from_colmap, generate_control_pts, getProjectionMatrix, center_crop, apply_distortion, rotate_camera, generate_pts_up_down_left_right, interpolate_with_control, apply_flow_up_down_left_right, mask_half, render_cubemap, generate_circular_mask
-from utils_mitsuba import readCamerasFromTransforms, PILtoTorch, cubemap_to_panorama, rotation_matrix_to_quaternion, quaternion_to_rotation_matrix
+from utils_mitsuba import readCamerasFromTransforms, PILtoTorch, cubemap_to_panorama, cubemap_to_panorama_torch, rotation_matrix_to_quaternion, quaternion_to_rotation_matrix
+from gsplat.rendering import rasterization
 
 @dataclass
 class Config:
@@ -553,6 +554,7 @@ class Runner:
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
             camera_model=self.cfg.camera_model,
+			if_cubemap=True,
             **kwargs,
         )
         if masks is not None:
@@ -692,7 +694,11 @@ class Runner:
             new_height = height
             Ks[0][0][-1] = new_width / 2
             Ks[0][1][-1] = new_height / 2
-            img_list, info_list = render_cubemap(width, height, new_width, new_height, fov90_width, fov90_height, Ks, camtoworlds, cfg, sh_degree_to_use, image_ids, masks, self.cubemap_net, self.rasterize_splats, cubemap_net_threshold=1.392)
+            img_list, info, img_perspective_list = render_cubemap(width, height, new_width, new_height, fov90_width, fov90_height,
+                                            Ks, camtoworlds, cfg, sh_degree_to_use, image_ids, masks, 
+                                            self.cubemap_net, self.rasterize_splats, cubemap_net_threshold=1.392, 
+                                            render_pano=True)
+
             #if renders.shape[-1] == 4:
             #    colors, depths = renders[..., 0:3], renders[..., 3:4]
             #else:
@@ -716,7 +722,7 @@ class Runner:
                 optimizers=self.optimizers,
                 state=self.strategy_state,
                 step=step,
-                info=info_list[0],
+                info=info,
             )
 
             # apply distortion field
@@ -924,7 +930,7 @@ class Runner:
                     optimizers=self.optimizers,
                     state=self.strategy_state,
                     step=step,
-                    info=info_list[0],
+                    info=info,
                     packed=cfg.packed,
                 )
             elif isinstance(self.cfg.strategy, MCMCStrategy):
@@ -933,7 +939,7 @@ class Runner:
                     optimizers=self.optimizers,
                     state=self.strategy_state,
                     step=step,
-                    info=info_list[0],
+                    info=info,
                     lr=schedulers[0].get_last_lr()[0],
                 )
             else:
@@ -996,7 +1002,7 @@ class Runner:
             new_height = height
             Ks[0][0][-1] = new_width / 2
             Ks[0][1][-1] = new_height / 2
-            img_list, info_list = render_cubemap(width, height, new_width, new_height, fov90_width, fov90_height, Ks, camtoworlds, cfg, cfg.sh_degree, image_ids, masks, cubemap_net, rasterize_splats, cubemap_net_threshold=1.392)
+            img_list, _ = render_cubemap(width, height, new_width, new_height, fov90_width, fov90_height, Ks, camtoworlds, cfg, cfg.sh_degree, image_ids, masks, cubemap_net, rasterize_splats, cubemap_net_threshold=1.392)
             final_image = torch.zeros_like(img_list[0])
             intensity_final = final_image.sum(dim=0, keepdim=True)  # Track the current intensities of the final image
             for img in img_list:
@@ -1167,6 +1173,64 @@ class Runner:
         )  # [1, H, W, 3]
         return render_colors[0].cpu().numpy()
 
+    @torch.no_grad()
+    def _viewer_render_fn_cubemap(
+        self, camera_state: nerfview.CameraState, img_wh: Tuple[int, int]
+    ):
+        width, height = img_wh
+        c2w = camera_state.c2w
+        K = camera_state.get_K(img_wh)
+        c2w = torch.from_numpy(c2w).float().cuda()
+        K = torch.from_numpy(K).float().cuda()
+        viewmat = c2w.inverse()
+
+        width = K[0, 0] * 2 * math.tan(1.57079632679 / 2)
+        height = K[1, 1] * 2 * math.tan(1.57079632679 / 2)
+        K[0, -1] = width / 2
+        K[1, -1] = height / 2
+
+        rasterization_fn = rasterization
+
+        camtoworlds_up = rotate_camera(viewmat, 90, 0, 0).unsqueeze(0)
+        camtoworlds_down = rotate_camera(viewmat, -90, 0, 0).unsqueeze(0)
+        camtoworlds_right = rotate_camera(viewmat, 0, 90, 0).unsqueeze(0)
+        camtoworlds_left = rotate_camera(viewmat, 0, -90, 0).unsqueeze(0)
+        camtoworlds_back = rotate_camera(viewmat, 0, 180, 0).unsqueeze(0)
+        camtoworlds_duplicated = torch.cat([viewmat.unsqueeze(0), camtoworlds_up, camtoworlds_down, camtoworlds_left, camtoworlds_right, camtoworlds_back], dim=0)  # [6, 4, 4]
+        Ks_duplicated = torch.cat([K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0)], dim=0)  # [6, 3, 3]
+        packed = True
+
+        render_colors, render_alphas, meta = rasterization_fn(
+            self.splats["means"],  # [N, 3]
+            self.splats["quats"],  # [N, 4]
+            self.splats["scales"],  # [N, 3]
+            self.splats["opacities"],  # [N]
+            torch.cat([self.splats["sh0"], self.splats["shN"]], 1),
+            camtoworlds_duplicated,
+            Ks_duplicated,
+            width,
+            height,
+            sh_degree=self.cfg.sh_degree,
+            render_mode="RGB",
+            radius_clip=3,
+            packed=packed,
+            if_cubemap=True,
+        )
+
+        renders_forward = render_colors.narrow(0, 0, 1) 
+        renders_up = render_colors.narrow(0, 1, 1)
+        renders_down = render_colors.narrow(0, 2, 1)
+        renders_left = render_colors.narrow(0, 3, 1)
+        renders_right = render_colors.narrow(0, 4, 1)
+        renders_back = render_colors.narrow(0, 5, 1)
+        render_list = [renders_forward.squeeze(0).permute(2, 0, 1), 
+                        renders_up.squeeze(0).permute(2, 0, 1), 
+                        renders_down.squeeze(0).permute(2, 0, 1), 
+                        renders_left.squeeze(0).permute(2, 0, 1), 
+                        renders_right.squeeze(0).permute(2, 0, 1), 
+                        renders_back.squeeze(0).permute(2, 0, 1)]
+        render_rgbs = cubemap_to_panorama_torch(render_list, 0, step=0).permute(1, 2, 0).cpu().numpy()
+        return render_rgbs
 
 def main(local_rank: int, world_rank, world_size: int, cfg: Config):
     if world_size > 1 and not cfg.disable_viewer:
@@ -1247,7 +1311,7 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
             Ks[0][0][-1] = new_width / 2
             Ks[0][1][-1] = new_height / 2
             cubemap_net = None
-            img_list, info_list, img_perspective_list = render_cubemap(width, height, new_width, new_height, fov90_width, fov90_height, Ks, camtoworlds, cfg, cfg.sh_degree, image_ids, masks, cubemap_net, runner.rasterize_splats, cubemap_net_threshold=1.392, render_pano=True)
+            img_list, _, img_perspective_list = render_cubemap(width, height, new_width, new_height, fov90_width, fov90_height, Ks, camtoworlds, cfg, cfg.sh_degree, image_ids, masks, cubemap_net, runner.rasterize_splats, cubemap_net_threshold=1.392, render_pano=True)
             final_image = torch.zeros_like(img_list[0])
             intensity_final = final_image.sum(dim=0, keepdim=True)
             for img in img_list:
@@ -1275,7 +1339,6 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
             i += 1
             print(i)
 
-        import pdb;pdb.set_trace()
         if cfg.compression is not None:
             runner.run_compression(step=step)
     else:

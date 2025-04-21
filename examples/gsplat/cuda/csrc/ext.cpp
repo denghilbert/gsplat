@@ -52,6 +52,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "fully_fused_projection_packed_bwd",
         &gsplat::fully_fused_projection_packed_bwd_tensor
     );
+    m.def(
+        "fully_fused_cubemap_projection_packed_fwd",
+        &gsplat::fully_fused_cubemap_projection_packed_fwd_tensor
+    );
+    m.def(
+        "fully_fused_cubemap_projection_packed_bwd",
+        &gsplat::fully_fused_cubemap_projection_packed_bwd_tensor
+    );
 
     m.def("compute_relocation", &gsplat::compute_relocation_tensor);
 

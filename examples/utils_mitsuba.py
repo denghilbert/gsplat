@@ -13,6 +13,9 @@ from plyfile import PlyData, PlyElement
 import trimesh
 import math
 import cv2
+import torch
+import torch.nn.functional as F
+from typing import List, Tuple, Optional
 
 class BasicPointCloud(NamedTuple):
     points: np.array
@@ -116,63 +119,63 @@ def PILtoTorch(pil_image, resolution):
 
 
 def cubemap_to_panorama(path, img_fov90_list, count, step=None):
-    #img_forward = np.transpose(img_fov90_list[0], (1, 2, 0))[..., ::-1]
-    #img_up = np.transpose(img_fov90_list[1], (1, 2, 0))[..., ::-1]
-    #img_down = np.transpose(img_fov90_list[2], (1, 2, 0))[..., ::-1]
-    #img_left = np.transpose(img_fov90_list[3], (1, 2, 0))[..., ::-1]
-    #img_right = np.transpose(img_fov90_list[4], (1, 2, 0))[..., ::-1]
-    #img_back = np.transpose(img_fov90_list[5], (1, 2, 0))[..., ::-1]
+    img_forward = np.transpose((img_fov90_list[0]*255).clamp(0, 255).cpu().detach().numpy(), (1, 2, 0))[..., ::-1]
+    img_up = np.transpose((img_fov90_list[1]*255).clamp(0, 255).cpu().detach().numpy(), (1, 2, 0))[..., ::-1]
+    img_down = np.transpose((img_fov90_list[2]*255).clamp(0, 255).cpu().detach().numpy(), (1, 2, 0))[..., ::-1]
+    img_left = np.transpose((img_fov90_list[3]*255).clamp(0, 255).cpu().detach().numpy(), (1, 2, 0))[..., ::-1]
+    img_right = np.transpose((img_fov90_list[4]*255).clamp(0, 255).cpu().detach().numpy(), (1, 2, 0))[..., ::-1]
+    img_back = np.transpose((img_fov90_list[5]*255).clamp(0, 255).cpu().detach().numpy(), (1, 2, 0))[..., ::-1]
 
-    img_forward = cv2.imread(os.path.join(path, f'validation_{step}/forward/forward_{count}.png'))
-    img_up = cv2.imread(os.path.join(path, f'validation_{step}/up/up_{count}.png'))
-    img_down = cv2.imread(os.path.join(path, f'validation_{step}/down/down_{count}.png'))
-    img_left = cv2.imread(os.path.join(path, f'validation_{step}/left/left_{count}.png'))
-    img_right = cv2.imread(os.path.join(path, f'validation_{step}/right/right_{count}.png'))
-    img_back = cv2.imread(os.path.join(path, f'validation_{step}/back/back_{count}.png'))
+    # img_forward = cv2.imread(os.path.join(path, f'validation_{step}/forward/forward_{count}.png'))
+    # img_up = cv2.imread(os.path.join(path, f'validation_{step}/up/up_{count}.png'))
+    # img_down = cv2.imread(os.path.join(path, f'validation_{step}/down/down_{count}.png'))
+    # img_left = cv2.imread(os.path.join(path, f'validation_{step}/left/left_{count}.png'))
+    # img_right = cv2.imread(os.path.join(path, f'validation_{step}/right/right_{count}.png'))
+    # img_back = cv2.imread(os.path.join(path, f'validation_{step}/back/back_{count}.png'))
 
-# Desired output image size (800x800)
+    # Desired output image size
     output_width = img_forward.shape[0] * 4
     output_height = img_forward.shape[1] * 4
 
-# Desired field of view
+    # Desired field of view
     fov_h_deg = 360  # Horizontal FOV in degrees
     fov_v_deg = 360  # Vertical FOV in degrees
 
     fov_h_rad = math.radians(fov_h_deg)  # Convert FOV to radians
     fov_v_rad = math.radians(fov_v_deg)
 
-# Create empty output image
+    # Create empty output image
     output_image = np.zeros((output_height, output_width, 3), dtype=np.uint8)
 
-# Precompute variables
+    # Precompute variables
     half_width = output_width / 2.0
     half_height = output_height / 2.0
 
-# Generate grid of pixel coordinates
+    # Generate grid of pixel coordinates
     x = np.linspace(0, output_width - 1, output_width)
     y = np.linspace(0, output_height - 1, output_height)
     x_grid, y_grid = np.meshgrid(x, y)
 
-# Normalized device coordinates (from -1 to +1)
+    # Normalized device coordinates (from -1 to +1)
     nx = (x_grid - half_width) / half_width
     ny = (half_height - y_grid) / half_height  # Invert y-axis for image coordinates
 
-# Compute angles in camera space
+    # Compute angles in camera space
     theta = nx * (fov_h_rad / 2)  # Horizontal angle
     phi = ny * (fov_v_rad / 2)    # Vertical angle
 
-# Compute ray directions in camera space
+    # Compute ray directions in camera space
     dir_x = np.sin(theta) * np.cos(phi)
     dir_y = np.sin(phi)
     dir_z = np.cos(theta) * np.cos(phi)
 
-# Normalize the direction vectors
+    # Normalize the direction vectors
     norm = np.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
     dir_x /= norm
     dir_y /= norm
     dir_z /= norm
 
-# Function to sample pixels from an image using bilinear interpolation
+    # Function to sample pixels from an image using bilinear interpolation
     def sample_image(img, u, v):
         img_height, img_width, channels = img.shape
 
@@ -213,15 +216,15 @@ def cubemap_to_panorama(path, img_fov90_list, count, step=None):
 
         return pixels.astype(np.uint8)
 
-# Determine which face to sample from based on the direction vector components
+    # Determine which face to sample from based on the direction vector components
     abs_dir_x = np.abs(dir_x)
     abs_dir_y = np.abs(dir_y)
     abs_dir_z = np.abs(dir_z)
 
-# Find the maximum component to determine the face
+    # Find the maximum component to determine the face
     max_dir = np.maximum.reduce([abs_dir_x, abs_dir_y, abs_dir_z])
 
-# Initialize the masks for each face
+    # Initialize the masks for each face
     forward_mask = (max_dir == abs_dir_z) & (dir_z > 0)
     back_mask = (max_dir == abs_dir_z) & (dir_z < 0)  # Mask for back face
     right_mask = (max_dir == abs_dir_x) & (dir_x > 0)
@@ -229,7 +232,7 @@ def cubemap_to_panorama(path, img_fov90_list, count, step=None):
     up_mask = (max_dir == abs_dir_y) & (dir_y > 0)
     down_mask = (max_dir == abs_dir_y) & (dir_y < 0)
 
-# Process each face
+    # Process each face
     faces = [
         ('forward', forward_mask, img_forward),
         ('back', back_mask, img_back),  # Add the back face processing
@@ -306,7 +309,8 @@ def cubemap_to_panorama(path, img_fov90_list, count, step=None):
                 # Assign sampled pixels to output image
                 output_image[y_indices[valid_indices], x_indices[valid_indices]] = pixels
 
-    return output_image
+    return torch.from_numpy(output_image/255.0).cuda().permute(2, 0, 1)
+
 
 
 def rotation_matrix_to_quaternion(R):
@@ -360,3 +364,193 @@ def quaternion_to_rotation_matrix(quaternion):
     ])
 
     return R
+
+def cubemap_to_panorama_torch(img_fov90_list, count, step=None):
+    img_forward = img_fov90_list[0].permute(1, 2, 0)
+    img_up = img_fov90_list[1].permute(1, 2, 0)
+    img_down = img_fov90_list[2].permute(1, 2, 0)
+    img_left = img_fov90_list[3].permute(1, 2, 0)
+    img_right = img_fov90_list[4].permute(1, 2, 0)
+    img_back = img_fov90_list[5].permute(1, 2, 0)
+
+    # Desired output image size
+    output_width = img_forward.shape[0] * 4
+    output_height = img_forward.shape[1] * 4
+
+    # Desired field of view
+    fov_h_deg = 360  # Horizontal FOV in degrees
+    fov_v_deg = 180  # Vertical FOV in degrees
+
+    fov_h_rad = math.radians(fov_h_deg)  # Convert FOV to radians
+    fov_v_rad = math.radians(fov_v_deg)
+
+    # Create empty output image
+    output_image = torch.zeros((output_height, output_width, 3), dtype=torch.float32, device=img_forward.device)
+
+    # Precompute variables
+    half_width = output_width / 2.0
+    half_height = output_height / 2.0
+
+    # Generate grid of pixel coordinates
+    x = torch.linspace(0, output_width - 1, output_width, device=img_forward.device)
+    y = torch.linspace(0, output_height - 1, output_height, device=img_forward.device)
+    x_grid, y_grid = torch.meshgrid(x, y, indexing='ij')
+
+    # Normalized device coordinates (from -1 to +1)
+    nx = (x_grid - half_width) / half_width
+    ny = (half_height - y_grid) / half_height  # Invert y-axis for image coordinates
+
+    # Compute angles in camera space
+    theta = nx * (fov_h_rad / 2)  # Horizontal angle
+    phi = ny * (fov_v_rad / 2)    # Vertical angle
+
+    # Compute ray directions in camera space
+    dir_x = torch.sin(theta) * torch.cos(phi)
+    dir_y = torch.sin(phi)
+    dir_z = torch.cos(theta) * torch.cos(phi)
+
+    # Normalize the direction vectors
+    norm = torch.sqrt(dir_x**2 + dir_y**2 + dir_z**2)
+    dir_x = dir_x / norm
+    dir_y = dir_y / norm
+    dir_z = dir_z / norm
+
+    # Function to sample pixels from an image using bilinear interpolation
+    def sample_image(img, u, v):
+        img_height, img_width, channels = img.shape
+
+        # Get the integer parts and the fractional parts
+        u0 = torch.floor(u).long()
+        v0 = torch.floor(v).long()
+        u1 = u0 + 1
+        v1 = v0 + 1
+
+        # Clip to valid indices
+        u0 = torch.clamp(u0, 0, img_width - 1)
+        u1 = torch.clamp(u1, 0, img_width - 1)
+        v0 = torch.clamp(v0, 0, img_height - 1)
+        v1 = torch.clamp(v1, 0, img_height - 1)
+
+        # The fractional parts
+        fu = u - u0
+        fv = v - v0
+
+        # Get pixel values at the four corners
+        Ia = img[v0, u0]  # Shape (N, 3)
+        Ib = img[v1, u0]
+        Ic = img[v0, u1]
+        Id = img[v1, u1]
+
+        # Expand weights to match the number of channels
+        wa = (1 - fu) * (1 - fv)
+        wb = (1 - fu) * fv
+        wc = fu * (1 - fv)
+        wd = fu * fv
+
+        # Add channel dimension to weights
+        wa = wa.unsqueeze(-1)
+        wb = wb.unsqueeze(-1)
+        wc = wc.unsqueeze(-1)
+        wd = wd.unsqueeze(-1)
+
+        # Sum up the weighted contributions
+        pixels = wa * Ia + wb * Ib + wc * Ic + wd * Id
+
+        return pixels
+
+    # Determine which face to sample from based on the direction vector components
+    abs_dir_x = torch.abs(dir_x)
+    abs_dir_y = torch.abs(dir_y)
+    abs_dir_z = torch.abs(dir_z)
+
+    # Find the maximum component to determine the face
+    max_dir = torch.maximum(torch.maximum(abs_dir_x, abs_dir_y), abs_dir_z)
+
+    # Initialize the masks for each face
+    forward_mask = (max_dir == abs_dir_z) & (dir_z > 0)
+    back_mask = (max_dir == abs_dir_z) & (dir_z < 0)  # Mask for back face
+    right_mask = (max_dir == abs_dir_x) & (dir_x > 0)
+    left_mask = (max_dir == abs_dir_x) & (dir_x < 0)
+    up_mask = (max_dir == abs_dir_y) & (dir_y > 0)
+    down_mask = (max_dir == abs_dir_y) & (dir_y < 0)
+
+    # Process each face
+    faces = [
+        ('forward', forward_mask, img_forward),
+        ('back', back_mask, img_back),  # Add the back face processing
+        ('right', right_mask, img_right),
+        ('left', left_mask, img_left),
+        ('up', up_mask, img_up),
+        ('down', down_mask, img_down)
+    ]
+
+    for face_name, face_mask, img_face in faces:
+        if torch.any(face_mask):
+            # Get the indices of pixels where face_mask is True
+            y_indices, x_indices = torch.where(face_mask)
+
+            # Extract the direction vectors for these pixels
+            dir_x_face = dir_x[face_mask]
+            dir_y_face = dir_y[face_mask]
+            dir_z_face = dir_z[face_mask]
+
+            # Map to face coordinate system
+            if face_name == 'forward':
+                dir_img_x = dir_x_face
+                dir_img_y = dir_y_face
+                dir_img_z = dir_z_face
+            elif face_name == 'back':
+                dir_img_x = -dir_x_face  # Flip for back face
+                dir_img_y = dir_y_face
+                dir_img_z = -dir_z_face
+            elif face_name == 'right':
+                dir_img_x = -dir_z_face
+                dir_img_y = dir_y_face
+                dir_img_z = dir_x_face
+            elif face_name == 'left':
+                dir_img_x = dir_z_face
+                dir_img_y = dir_y_face
+                dir_img_z = -dir_x_face
+            elif face_name == 'up':
+                dir_img_x = dir_x_face
+                dir_img_y = -dir_z_face
+                dir_img_z = dir_y_face
+            elif face_name == 'down':
+                dir_img_x = dir_x_face
+                dir_img_y = dir_z_face
+                dir_img_z = -dir_y_face
+
+            # Project onto the image plane
+            epsilon = 1e-6  # Small value to avoid division by zero
+            valid = torch.abs(dir_img_z) > epsilon  # Use absolute value to handle near-zero z
+
+            if torch.any(valid):
+                # Get valid indices
+                valid_indices = torch.where(valid)[0]
+
+                dir_img_x = dir_img_x[valid]
+                dir_img_y = dir_img_y[valid]
+                dir_img_z = dir_img_z[valid]
+
+                u_img = dir_img_x / torch.abs(dir_img_z)
+                v_img = dir_img_y / torch.abs(dir_img_z)
+
+                # Convert to pixel coordinates in the input image
+                img_height, img_width, _ = img_face.shape
+
+                u = (u_img + 1) * (img_width - 1) / 2.0
+                v = (1 - v_img) * (img_height - 1) / 2.0  # Invert y-axis
+
+                # Clip coordinates to image bounds
+                u = torch.clamp(u, 0, img_width - 1)
+                v = torch.clamp(v, 0, img_height - 1)
+
+                # Sample pixels using bilinear interpolation
+                pixels = sample_image(img_face, u, v)
+
+                # Assign sampled pixels to output image
+                output_image[y_indices[valid_indices], x_indices[valid_indices]] = pixels
+
+    # Rotate the image clockwise 90 degrees by permuting and flipping dimensions
+    # First permute to [C, H, W] format, then rotate by transposing and flipping
+    return output_image.permute(2, 0, 1).transpose(1, 2)

@@ -474,38 +474,61 @@ def render_cubemap(width, height, new_width, new_height, fov90_width, fov90_heig
     if render_pano:
         camtoworlds_back = rotate_camera(camtoworlds[0].inverse(), 0, 180, 0).unsqueeze(0).inverse()
         img_perspective_list = []
-    info_list = []
-    renders_forward, _, info_forward = rasterize_splats(camtoworlds=camtoworlds, Ks=Ks, width=new_width, height=new_height, sh_degree=sh_degree_to_use, near_plane=cfg.near_plane, far_plane=cfg.far_plane, image_ids=image_ids, render_mode="RGB+ED" if cfg.depth_loss else "RGB", masks=masks)
-    renders_up, _, info_up = rasterize_splats(camtoworlds=camtoworlds_up, Ks=Ks, width=new_width, height=new_height, sh_degree=sh_degree_to_use, near_plane=cfg.near_plane, far_plane=cfg.far_plane, image_ids=image_ids, render_mode="RGB+ED" if cfg.depth_loss else "RGB", masks=masks)
-    renders_down, _, info_down = rasterize_splats(camtoworlds=camtoworlds_down, Ks=Ks, width=new_width, height=new_height, sh_degree=sh_degree_to_use, near_plane=cfg.near_plane, far_plane=cfg.far_plane, image_ids=image_ids, render_mode="RGB+ED" if cfg.depth_loss else "RGB", masks=masks)
-    renders_left, _, info_left = rasterize_splats(camtoworlds=camtoworlds_left, Ks=Ks, width=new_width, height=new_height, sh_degree=sh_degree_to_use, near_plane=cfg.near_plane, far_plane=cfg.far_plane, image_ids=image_ids, render_mode="RGB+ED" if cfg.depth_loss else "RGB", masks=masks)
-    renders_right, _, info_right = rasterize_splats(camtoworlds=camtoworlds_right, Ks=Ks, width=new_width, height=new_height, sh_degree=sh_degree_to_use, near_plane=cfg.near_plane, far_plane=cfg.far_plane, image_ids=image_ids, render_mode="RGB+ED" if cfg.depth_loss else "RGB", masks=masks)
+
+    # Concatenate all camera matrices and intrinsics
     if render_pano:
-        renders_back, _, _ = rasterize_splats(camtoworlds=camtoworlds_back, Ks=Ks, width=new_width, height=new_height, sh_degree=sh_degree_to_use, near_plane=cfg.near_plane, far_plane=cfg.far_plane, image_ids=image_ids, render_mode="RGB+ED" if cfg.depth_loss else "RGB", masks=masks)
+        camtoworlds_duplicated = torch.cat([camtoworlds, camtoworlds_up, camtoworlds_down, camtoworlds_left, camtoworlds_right, camtoworlds_back], dim=0)  # [6, 4, 4]
+        Ks_duplicated = torch.cat([Ks, Ks, Ks, Ks, Ks, Ks], dim=0)  # [6, 3, 3]
+    else:
+        camtoworlds_duplicated = torch.cat([camtoworlds, camtoworlds_up, camtoworlds_down, camtoworlds_left, camtoworlds_right], dim=0)  # [5, 4, 4]
+        Ks_duplicated = torch.cat([Ks, Ks, Ks, Ks, Ks], dim=0)  # [5, 3, 3]
+
+    # Single rasterize_splats call for all views
+    renders_all, _, info_all = rasterize_splats(
+        camtoworlds=camtoworlds_duplicated,
+        Ks=Ks_duplicated,
+        width=new_width,
+        height=new_height,
+        sh_degree=sh_degree_to_use,
+        near_plane=cfg.near_plane,
+        far_plane=cfg.far_plane,
+        image_ids=image_ids,
+        render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+        masks=masks
+    )
+
+    # Split the results
+    # Use tensor operations to split renders_all to maintain differentiability
+    renders_forward = renders_all.narrow(0, 0, 1) 
+    renders_up = renders_all.narrow(0, 1, 1)
+    renders_down = renders_all.narrow(0, 2, 1)
+    renders_left = renders_all.narrow(0, 3, 1)
+    renders_right = renders_all.narrow(0, 4, 1)
+    if render_pano:
+        renders_back = renders_all.narrow(0, 5, 1)
         img_perspective_list.append(renders_forward)
         img_perspective_list.append(renders_up)
         img_perspective_list.append(renders_down)
         img_perspective_list.append(renders_left)
         img_perspective_list.append(renders_right)
         img_perspective_list.append(renders_back)
-    info_list.append(info_forward)
-    info_list.append(info_up)
-    info_list.append(info_down)
-    info_list.append(info_left)
-    info_list.append(info_right)
 
-    #torchvision.utils.save_image(renders_forward.permute(0, 3, 1, 2)[0] * mask_fov90, os.path.join(cfg.result_dir, f'forward.png'))
-    #torchvision.utils.save_image(renders_up.permute(0, 3, 1, 2)[0] * mask_fov90, os.path.join(cfg.result_dir, f'up.png'))
-    #torchvision.utils.save_image(renders_down.permute(0, 3, 1, 2)[0] * mask_fov90, os.path.join(cfg.result_dir, f'down.png'))
-    #torchvision.utils.save_image(renders_left.permute(0, 3, 1, 2)[0] * mask_fov90, os.path.join(cfg.result_dir, f'left.png'))
-    #torchvision.utils.save_image(renders_right.permute(0, 3, 1, 2)[0] * mask_fov90, os.path.join(cfg.result_dir, f'right.png'))
+    # import os
+    # debug_dir = os.path.join(os.path.dirname(__file__), 'debug')
+    # os.makedirs(debug_dir, exist_ok=True)
+    # torchvision.utils.save_image(renders_forward.permute(0, 3, 1, 2), os.path.join(debug_dir, 'forward_face.png'))
+    # torchvision.utils.save_image(renders_up.permute(0, 3, 1, 2), os.path.join(debug_dir, 'up_face.png'))
+    # torchvision.utils.save_image(renders_down.permute(0, 3, 1, 2), os.path.join(debug_dir, 'down_face.png'))
+    # torchvision.utils.save_image(renders_left.permute(0, 3, 1, 2), os.path.join(debug_dir, 'left_face.png'))
+    # torchvision.utils.save_image(renders_right.permute(0, 3, 1, 2), os.path.join(debug_dir, 'right_face.png'))
+    # if render_pano:
+    #     torchvision.utils.save_image(renders_back.permute(0, 3, 1, 2), os.path.join(debug_dir, 'back_face.png'))
+    # import pdb;pdb.set_trace()
 
 
     rays_4_faces = generate_pts_up_down_left_right(new_width, new_height, Ks[0])
     rays_residual_4_faces = generate_pts_up_down_left_right(new_width, new_height, Ks[0])
     img_list = []
-    #control_r = torch.linspace(0, cubemap_net_threshold, 10000).unsqueeze(1).cuda()
-    #control_theta = cubemap_net.forward(control_r, sensor_to_frustum=True)
     control_theta, control_r = None, None
 
     img_fish_forward, img_perspective, control_theta = apply_flow_up_down_left_right(width, height, Ks[0], rays_4_faces, rays_residual_4_faces, renders_forward.permute(0, 3, 1, 2)[0]*mask_fov90, types="forward", is_fisheye=True, control_r=control_r, control_theta=control_theta, cubemap_net_threshold=cubemap_net_threshold)
@@ -525,13 +548,7 @@ def render_cubemap(width, height, new_width, new_height, fov90_width, fov90_heig
     if render_pano:
         img_fish_back, img_perspective = apply_flow_up_down_left_right(width, height, Ks[0], rays_4_faces, rays_residual_4_faces, renders_back.permute(0, 3, 1, 2)[0]*mask_fov90, types="right", is_fisheye=True, control_r=control_r, control_theta=control_theta, cubemap_net_threshold=cubemap_net_threshold)
 
-    #torchvision.utils.save_image(img_fish_forward, os.path.join(cfg.result_dir, f'forward_fish.png'))
-    #torchvision.utils.save_image(img_fish_up, os.path.join(cfg.result_dir, f'up_fish.png'))
-    #torchvision.utils.save_image(img_fish_down, os.path.join(cfg.result_dir, f'down_fish.png'))
-    #torchvision.utils.save_image(img_fish_left, os.path.join(cfg.result_dir, f'left_fish.png'))
-    #torchvision.utils.save_image(img_fish_right, os.path.join(cfg.result_dir, f'right_fish.png'))
-
     if render_pano:
-        return img_list, info_list, img_perspective_list
-    return img_list, info_list
+        return img_list, info_all, img_perspective_list
+    return img_list, info_all
 
