@@ -22,6 +22,8 @@ import viser
 from gsplat._helper import load_test_data
 from gsplat.distributed import cli
 from gsplat.rendering import rasterization
+from utils_cubemap import rotate_camera
+from utils_mitsuba import cubemap_to_panorama_torch
 
 
 def main(local_rank: int, world_rank, world_size: int, args):
@@ -123,6 +125,8 @@ def main(local_rank: int, world_rank, world_size: int, args):
         shN = torch.cat(shN, dim=0)
         colors = torch.cat([sh0, shN], dim=-2)
         sh_degree = int(math.sqrt(colors.shape[-2]) - 1)
+        means[:, 0] *= -1
+        means[:, -1] *= -1
 
         # # crop
         # aabb = torch.tensor((-1.0, -1.0, -1.0, 1.0, 1.0, 0.7), device=device)
@@ -167,6 +171,21 @@ def main(local_rank: int, world_rank, world_size: int, args):
         K = torch.from_numpy(K).float().to(device)
         viewmat = c2w.inverse()
 
+        if args.if_cubemap:
+            # fovx = 2 * torch.atan(width / 2.0 / K[0, 0])
+            # fovy = 2 * torch.atan(height / 2.0 / K[1, 1])
+            # print(K)
+            # print(fovx, fovy)
+            width = K[0, 0] * 2 * math.tan(1.57079632679 / 2)
+            height = K[1, 1] * 2 * math.tan(1.57079632679 / 2)
+            K[0, -1] = width / 2
+            K[1, -1] = height / 2
+            # fovx = 2 * torch.atan(width / 2.0 / K[0, 0])
+            # fovy = 2 * torch.atan(height / 2.0 / K[1, 1])
+            # print(K)
+            # print(fovx, fovy)
+            # import pdb; pdb.set_trace()
+
         if args.backend == "gsplat":
             rasterization_fn = rasterization
         elif args.backend == "inria":
@@ -176,22 +195,54 @@ def main(local_rank: int, world_rank, world_size: int, args):
         else:
             raise ValueError
 
+        if args.if_cubemap:
+            camtoworlds_up = rotate_camera(viewmat, 90, 0, 0).unsqueeze(0)
+            camtoworlds_down = rotate_camera(viewmat, -90, 0, 0).unsqueeze(0)
+            camtoworlds_right = rotate_camera(viewmat, 0, 90, 0).unsqueeze(0)
+            camtoworlds_left = rotate_camera(viewmat, 0, -90, 0).unsqueeze(0)
+            camtoworlds_back = rotate_camera(viewmat, 0, 180, 0).unsqueeze(0)
+            camtoworlds_duplicated = torch.cat([viewmat.unsqueeze(0), camtoworlds_up, camtoworlds_down, camtoworlds_left, camtoworlds_right, camtoworlds_back], dim=0)  # [6, 4, 4]
+            Ks_duplicated = torch.cat([K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0), K.unsqueeze(0)], dim=0)  # [6, 3, 3]
+            packed = True
+        else:
+            camtoworlds_duplicated = viewmat[None]  # [1, 4, 4]
+            Ks_duplicated = K[None]  # [1, 3, 3]
+            packed = False
+
         render_colors, render_alphas, meta = rasterization_fn(
             means,  # [N, 3]
             quats,  # [N, 4]
             scales,  # [N, 3]
             opacities,  # [N]
             colors,  # [N, S, 3]
-            viewmat[None],  # [1, 4, 4]
-            K[None],  # [1, 3, 3]
+            camtoworlds_duplicated,
+            Ks_duplicated,
             width,
             height,
             sh_degree=sh_degree,
             render_mode="RGB",
             # this is to speedup large-scale rendering by skipping far-away Gaussians.
             radius_clip=3,
+            packed=packed,
+            if_cubemap=args.if_cubemap,
         )
-        render_rgbs = render_colors[0, ..., 0:3].cpu().numpy()
+
+        if args.if_cubemap:
+            renders_forward = render_colors.narrow(0, 0, 1) 
+            renders_up = render_colors.narrow(0, 1, 1)
+            renders_down = render_colors.narrow(0, 2, 1)
+            renders_left = render_colors.narrow(0, 3, 1)
+            renders_right = render_colors.narrow(0, 4, 1)
+            renders_back = render_colors.narrow(0, 5, 1)
+            render_list = [renders_forward.squeeze(0).permute(2, 0, 1), 
+                           renders_up.squeeze(0).permute(2, 0, 1), 
+                           renders_down.squeeze(0).permute(2, 0, 1), 
+                           renders_left.squeeze(0).permute(2, 0, 1), 
+                           renders_right.squeeze(0).permute(2, 0, 1), 
+                           renders_back.squeeze(0).permute(2, 0, 1)]
+            render_rgbs = cubemap_to_panorama_torch(render_list, 0, step=0).permute(1, 2, 0).cpu().numpy()
+        else:
+            render_rgbs = render_colors[0, ..., 0:3].cpu().numpy()
         return render_rgbs
 
     server = viser.ViserServer(port=args.port, verbose=False)
@@ -225,6 +276,8 @@ if __name__ == "__main__":
         "--port", type=int, default=8080, help="port for the viewer server"
     )
     parser.add_argument("--backend", type=str, default="gsplat", help="gsplat, inria")
+    parser.add_argument("--if_cubemap", action="store_true", help="if use cubemap")
+
     args = parser.parse_args()
     assert args.scene_grid % 2 == 1, "scene_grid must be odd"
 
